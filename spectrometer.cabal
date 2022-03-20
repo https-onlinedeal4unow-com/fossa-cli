@@ -69,11 +69,13 @@ common deps
     , attoparsec                   ^>=0.14.1
     , base16-bytestring            ^>=1.0.1.0
     , bytestring                   ^>=0.10.8
+    , bzlib                        ^>=0.5.0.0
     , cgroup-rts-threads           ^>=0.2.0.0
     , codec-rpm                    ^>=0.2.2
     , concurrent-output            ^>=1.10.12
     , conduit                      ^>=1.3.2
     , conduit-extra                ^>=1.3.5
+    , conduit-zstd                 ^>=0.0.2.0
     , containers                   ^>=0.6.0
     , cpio-conduit                 ^>=0.7.0
     , cryptonite                   ^>=0.29
@@ -89,6 +91,7 @@ common deps
     , hedn                         ^>=0.3.0.1
     , http-client                  ^>=0.7.1
     , http-types                   ^>=0.12.3
+    , lzma                         ^>=0.0.0.3
     , lzma-conduit                 ^>=1.2.1
     , megaparsec                   ^>=9.1.0
     , modern-uri                   ^>=0.3.4
@@ -97,6 +100,7 @@ common deps
     , parser-combinators           ^>=1.3
     , path                         ^>=0.9.0
     , path-io                      ^>=1.6.0
+    , pretty-simple                ^>=4.0
     , prettyprinter                >=1.6      && <1.8
     , prettyprinter-ansi-terminal  ^>=1.1.1
     , random                       ^>=1.2.0
@@ -115,14 +119,19 @@ common deps
     , tomland                      ^>=1.3.3.0
     , transformers
     , typed-process                ^>=0.2.6
+    , unix-compat                  ^>=0.5.4
     , unordered-containers         ^>=0.2.10
     , vector                       ^>=0.12.0.3
     , versions                     ^>=5.0.0
+    , word8                        ^>=0.1.3
     , xml                          ^>=1.3.14
     , yaml                         ^>=0.11.1
     , yarn-lock                    ^>=0.6.5
     , zip                          ^>=1.7.1
     , zlib                         ^>=0.6.2.1
+
+  if !os(windows)
+    build-depends: unix ^>=2.7.2.2
 
 library
   import:          lang
@@ -134,23 +143,45 @@ library
     App.Docs
     App.Fossa.Analyze
     App.Fossa.Analyze.Debug
+    App.Fossa.Analyze.Discover
+    App.Fossa.Analyze.Filter
     App.Fossa.Analyze.Graph
     App.Fossa.Analyze.GraphBuilder
     App.Fossa.Analyze.GraphMangler
+    App.Fossa.Analyze.Log4jReport
     App.Fossa.Analyze.Project
     App.Fossa.Analyze.Record
+    App.Fossa.Analyze.ScanSummary
     App.Fossa.Analyze.Types
+    App.Fossa.Analyze.Upload
     App.Fossa.API.BuildLink
     App.Fossa.API.BuildWait
     App.Fossa.ArchiveUploader
     App.Fossa.BinaryDeps
     App.Fossa.BinaryDeps.Jar
-    App.Fossa.Configuration
+    App.Fossa.Config.Analyze
+    App.Fossa.Config.Common
+    App.Fossa.Config.ConfigFile
+    App.Fossa.Config.Container
+    App.Fossa.Config.Container.Analyze
+    App.Fossa.Config.Container.Common
+    App.Fossa.Config.Container.Dump
+    App.Fossa.Config.Container.Parse
+    App.Fossa.Config.Container.Test
+    App.Fossa.Config.DumpBinaries
+    App.Fossa.Config.EnvironmentVars
+    App.Fossa.Config.LinkUserBinaries
+    App.Fossa.Config.ListTargets
+    App.Fossa.Config.Report
+    App.Fossa.Config.Test
     App.Fossa.Container
     App.Fossa.Container.Analyze
+    App.Fossa.Container.Scan
     App.Fossa.Container.Test
+    App.Fossa.DumpBinaries
     App.Fossa.EmbeddedBinary
     App.Fossa.FossaAPIV1
+    App.Fossa.LicenseScanner
     App.Fossa.ListTargets
     App.Fossa.Main
     App.Fossa.ManualDeps
@@ -158,19 +189,25 @@ library
     App.Fossa.ProjectInference
     App.Fossa.Report
     App.Fossa.Report.Attribution
+    App.Fossa.RunThemis
+    App.Fossa.Subcommand
     App.Fossa.Test
-    App.Fossa.VPS.AOSPNotice
-    App.Fossa.VPS.NinjaGraph
-    App.Fossa.VPS.Report
-    App.Fossa.VPS.Scan
     App.Fossa.VPS.Scan.Core
     App.Fossa.VPS.Scan.RunWiggins
     App.Fossa.VPS.Scan.ScotlandYard
-    App.Fossa.VPS.Test
     App.Fossa.VPS.Types
+    App.Fossa.VSI.Analyze
+    App.Fossa.VSI.DynLinked
+    App.Fossa.VSI.DynLinked.Internal.Binary
+    App.Fossa.VSI.DynLinked.Internal.Lookup
+    App.Fossa.VSI.DynLinked.Internal.Lookup.DEB
+    App.Fossa.VSI.DynLinked.Internal.Lookup.RPM
+    App.Fossa.VSI.DynLinked.Internal.Resolve
+    App.Fossa.VSI.DynLinked.Types
+    App.Fossa.VSI.DynLinked.Util
+    App.Fossa.VSI.Fingerprint
     App.Fossa.VSI.IAT.AssertRevisionBinaries
     App.Fossa.VSI.IAT.AssertUserDefinedBinaries
-    App.Fossa.VSI.IAT.Fingerprint
     App.Fossa.VSI.IAT.Resolve
     App.Fossa.VSI.IAT.Types
     App.Fossa.VSI.Types
@@ -179,6 +216,7 @@ library
     App.Pathfinder.Main
     App.Pathfinder.Scan
     App.Pathfinder.Types
+    App.Support
     App.Types
     App.Util
     App.Version
@@ -188,10 +226,11 @@ library
     Control.Carrier.AtomicState
     Control.Carrier.Debug
     Control.Carrier.Diagnostics
-    Control.Carrier.Diagnostics.StickyContext
     Control.Carrier.Finally
     Control.Carrier.Output.IO
     Control.Carrier.Simple
+    Control.Carrier.Stack
+    Control.Carrier.Stack.StickyLog
     Control.Carrier.StickyLogger
     Control.Carrier.TaskPool
     Control.Carrier.Threaded
@@ -207,20 +246,29 @@ library
     Control.Effect.Record.TH
     Control.Effect.Replay
     Control.Effect.Replay.TH
+    Control.Effect.Stack
     Control.Effect.StickyLogger
     Control.Effect.TaskPool
     Control.Exception.Extra
+    Control.Timeout
+    Control.Timeout.Internal
     Data.Aeson.Extra
+    Data.Conduit.Extra
     Data.FileEmbed.Extra
     Data.Flag
     Data.Functor.Extra
     Data.Glob
     Data.List.Extra
+    Data.Monoid.Extra
     Data.Set.NonEmpty
     Data.String.Conversion
     Data.Tagged
     Data.Text.Extra
     DepTypes
+    Diag.Common
+    Diag.Diagnostic
+    Diag.Monad
+    Diag.Result
     Discovery.Archive
     Discovery.Archive.RPM
     Discovery.Filters
@@ -243,12 +291,14 @@ library
     Strategy.Cargo
     Strategy.Carthage
     Strategy.Cocoapods
+    Strategy.Cocoapods.Errors
     Strategy.Cocoapods.Podfile
     Strategy.Cocoapods.PodfileLock
     Strategy.Composer
     Strategy.Conda
     Strategy.Conda.CondaList
     Strategy.Conda.EnvironmentYml
+    Strategy.Dart.Errors
     Strategy.Dart.PubDeps
     Strategy.Dart.PubSpec
     Strategy.Dart.PubSpecLock
@@ -261,6 +311,7 @@ library
     Strategy.Go.GlideLock
     Strategy.Go.GoList
     Strategy.Go.Gomod
+    Strategy.Go.GoModGraph
     Strategy.Go.GopkgLock
     Strategy.Go.GopkgToml
     Strategy.Go.Transitive
@@ -269,6 +320,9 @@ library
     Strategy.Gomodules
     Strategy.Googlesource.RepoManifest
     Strategy.Gradle
+    Strategy.Gradle.Common
+    Strategy.Gradle.Errors
+    Strategy.Gradle.ResolutionApi
     Strategy.Haskell.Cabal
     Strategy.Haskell.Stack
     Strategy.Leiningen
@@ -281,7 +335,10 @@ library
     Strategy.Maven.Pom.PomFile
     Strategy.Maven.Pom.Resolver
     Strategy.Mix
+    Strategy.Nim
+    Strategy.Nim.NimbleLock
     Strategy.Node
+    Strategy.Node.Errors
     Strategy.Node.Npm.PackageLock
     Strategy.Node.PackageJson
     Strategy.Node.YarnV1.YarnLock
@@ -296,6 +353,7 @@ library
     Strategy.NuGet.ProjectJson
     Strategy.Perl
     Strategy.Pub
+    Strategy.Python.Errors
     Strategy.Python.Pipenv
     Strategy.Python.Poetry
     Strategy.Python.Poetry.Common
@@ -308,8 +366,11 @@ library
     Strategy.Rebar3
     Strategy.RPM
     Strategy.Ruby.BundleShow
+    Strategy.Ruby.Errors
     Strategy.Ruby.GemfileLock
+    Strategy.Ruby.Parse
     Strategy.Scala
+    Strategy.Swift.Errors
     Strategy.Swift.PackageResolved
     Strategy.Swift.PackageSwift
     Strategy.Swift.Xcode.Pbxproj
@@ -353,36 +414,51 @@ test-suite unit-tests
     App.Fossa.Configuration.ConfigurationSpec
     App.Fossa.ManualDepsSpec
     App.Fossa.Report.AttributionSpec
-    App.Fossa.VPS.NinjaGraphSpec
+    App.Fossa.Report.Log4jReportSpec
+    App.Fossa.VSI.DynLinked.Internal.BinarySpec
+    App.Fossa.VSI.DynLinked.Internal.Lookup.DEBSpec
+    App.Fossa.VSI.DynLinked.Internal.Lookup.RPMSpec
+    App.Fossa.VSI.DynLinked.Internal.ResolveSpec
+    App.Fossa.VSI.DynLinked.UtilSpec
+    App.Fossa.VSI.FingerprintSpec
+    BundlerSpec
+    Cargo.CargoTomlSpec
     Cargo.MetadataSpec
     Carthage.CarthageSpec
     Clojure.ClojureSpec
+    Cocoapods.CocoapodsSpec
     Cocoapods.PodfileLockSpec
     Cocoapods.PodfileSpec
+    Composer.ComposerJsonSpec
     Composer.ComposerLockSpec
     Conda.CondaListSpec
     Conda.EnvironmentYmlSpec
     Control.Carrier.DiagnosticsSpec
+    Control.TimeoutSpec
     Dart.PubDepsSpec
     Dart.PubSpecLockSpec
     Dart.PubSpecSpec
     Discovery.ArchiveSpec
     Discovery.FiltersSpec
+    Discovery.WalkSpec
     Effect.ExecSpec
     Elixir.MixTreeSpec
     Erlang.ConfigParserSpec
     Erlang.Rebar3TreeSpec
+    Extra.ListSpec
     Extra.TextSpec
     Fortran.FpmTomlSpec
     Fossa.API.TypesSpec
     Go.GlideLockSpec
     Go.GoListSpec
+    Go.GoModGraphSpec
     Go.GomodSpec
     Go.GopkgLockSpec
     Go.GopkgTomlSpec
     Go.TransitiveSpec
     Googlesource.RepoManifestSpec
-    Gradle.GradleSpec
+    Gradle.CommonSpec
+    Gradle.ResolutionApiSpec
     Graphing.HydrateSpec
     GraphingSpec
     GraphUtil
@@ -391,6 +467,7 @@ test-suite unit-tests
     Maven.DepTreeSpec
     Maven.PluginStrategySpec
     Maven.PomStrategySpec
+    Nim.NimbleSpec
     Node.NpmLockSpec
     Node.PackageJsonSpec
     NuGet.NuspecSpec
@@ -408,9 +485,11 @@ test-suite unit-tests
     Python.ReqTxtSpec
     Python.RequirementsSpec
     Python.SetupPySpec
+    ResultUtil
     RPM.SpecFileSpec
     Ruby.BundleShowSpec
     Ruby.GemfileLockSpec
+    Ruby.ParseSpec
     Swift.PackageResolvedSpec
     Swift.PackageSwiftSpec
     Swift.Xcode.PbxprojParserSpec
@@ -428,4 +507,40 @@ test-suite unit-tests
     , hspec-expectations-pretty-diff  ^>=0.7.2.5
     , hspec-hedgehog                  ^>=0.0.1.2
     , hspec-megaparsec                ^>=2.2
+    , spectrometer
+
+test-suite integration-tests
+  import:             lang
+  import:             deps
+  type:               exitcode-stdio-1.0
+  hs-source-dirs:     integration-test
+  main-is:            test.hs
+  ghc-options:        -threaded
+  other-modules:
+    Analysis.CarthageSpec
+    Analysis.ClojureSpec
+    Analysis.CocoapodsSpec
+    Analysis.ElixirSpec
+    Analysis.ErlangSpec
+    Analysis.FixtureExpectationUtils
+    Analysis.FixtureUtils
+    Analysis.GoSpec
+    Analysis.GradleSpec
+    Analysis.MavenSpec
+    Analysis.NugetSpec
+    Analysis.Python.PipenvSpec
+    Analysis.Python.PoetrySpec
+    Analysis.Python.SetuptoolsSpec
+    Analysis.RubySpec
+    Analysis.RustSpec
+
+  build-tool-depends: hspec-discover:hspec-discover ^>=2.8.2
+  build-depends:
+    , hedgehog                        ^>=1.0.2
+    , hspec                           ^>=2.8.2
+    , hspec-core                      ^>=2.8.2
+    , hspec-expectations-pretty-diff  ^>=0.7.2.5
+    , hspec-hedgehog                  ^>=0.0.1.2
+    , hspec-megaparsec                ^>=2.2
+    , req-conduit                     ^>=1.0.1
     , spectrometer

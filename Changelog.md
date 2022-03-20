@@ -1,5 +1,136 @@
 # Fossa CLI Changelog
 
+## v3.1.4
+
+- Handles symlink loops in directory structure. ([#827](https://github.com/fossas/fossa-cli/pull/827))
+- No longer crashes when `fossa-deps.yml` exists but has an empty `archived-dependencies` property. ([#832](https://github.com/fossas/fossa-cli/pull/832))
+
+## v3.1.3
+
+- Adds support for identifying dynamically linked dependencies in an output binary. ([#818](https://github.com/fossas/fossa-cli/pull/818), [#788](https://github.com/fossas/fossa-cli/pull/788), [#780](https://github.com/fossas/fossa-cli/pull/780), [#788](https://github.com/fossas/fossa-cli/pull/778), [#771](https://github.com/fossas/fossa-cli/pull/771), [#770](https://github.com/fossas/fossa-cli/pull/770))
+
+## v3.1.2
+
+- Fixes a bug which ignored the `server` field in the config file. ([#821](https://github.com/fossas/fossa-cli/pull/821))
+
+## v3.1.1
+
+- UX: Parser error messages include call to action. ([#801](https://github.com/fossas/fossa-cli/pull/801))
+- UX: Improves error message when executable is not found. ([#813](https://github.com/fossas/fossa-cli/pull/813))
+- UX: Fixes minor scan summary ordering bug. ([#813](https://github.com/fossas/fossa-cli/pull/813))
+- UX: Writes errors and warnings encountered in analyze to temp file. ([#813](https://github.com/fossas/fossa-cli/pull/813))
+- Ruby: Improves error and warning messages. ([#800](https://github.com/fossas/fossa-cli/pull/800))
+- Python: `setup.py` error messages are _less_ noisy. ([#801](https://github.com/fossas/fossa-cli/pull/801))
+- Dart: Improves error and warning messages. ([#800](https://github.com/fossas/fossa-cli/pull/806))
+- Pipenv: Improves error and warning messages. ([#803](https://github.com/fossas/fossa-cli/pull/803))
+- Poetry: Improves error and warning messages. ([#803](https://github.com/fossas/fossa-cli/pull/803))
+- Maven: Improves error and warning messages. ([#808](https://github.com/fossas/fossa-cli/pull/808))
+- Nodejs: Improves error and warning messages. ([#805](https://github.com/fossas/fossa-cli/pull/805))
+- Swift: Improves error and warning messages. ([#802](https://github.com/fossas/fossa-cli/pull/802))
+- Cocoapods: Improves error and warning messages. ([#807](https://github.com/fossas/fossa-cli/pull/807))
+- Golang: Improves error and warning messages. ([#809](https://github.com/fossas/fossa-cli/pull/809))
+- Gradle: Improves error and warning messages. ([#804](https://github.com/fossas/fossa-cli/pull/804))
+- Scala: Improves error and warning messages. ([#813](https://github.com/fossas/fossa-cli/pull/813))
+- Clojure: Improves error and warning messages. ([#813](https://github.com/fossas/fossa-cli/pull/813))
+- Nim: Improves error and warning messages. ([#813](https://github.com/fossas/fossa-cli/pull/813))
+- Rust: Improves error and warning messages. ([#813](https://github.com/fossas/fossa-cli/pull/813))
+- UX: Improves errors for dynamic deps, and binary deps analysis. ([#819](https://github.com/fossas/fossa-cli/pull/819))
+- UX: Improves analysis scan summary rendering. ([#819](https://github.com/fossas/fossa-cli/pull/819))
+
+
+## v3.1.0 
+
+- Fossa API: Uses `SSL_CERT_FILE`, and `SSL_CERT_DIR` environment variable for certificates when provided. ([#760](https://github.com/fossas/fossa-cli/pull/760)) 
+- UX: Uses error messages received from FOSSA api, when reporting API related errors. ([#792](https://github.com/fossas/fossa-cli/pull/792))
+- UX: Adds scan summary tabulating errors, warnings, project directory, and skipped projects. ([#790](https://github.com/fossas/fossa-cli/pull/790))   
+
+## v3.0.18
+
+- Fully percent-encode sub-paths in generated URLs. ([#789](https://github.com/fossas/fossa-cli/pull/789))
+- Improve error tracking and outputs. ([#774](https://github.com/fossas/fossa-cli/pull/774))
+- Cabal: Fixed a filter error that treated cabal projects as stack projects. ([#787](https://github.com/fossas/fossa-cli/pull/787))
+
+## v3.0.17
+
+- Npm: Fixes an issue where a package-lock.json dep with a boolean 'resolved' key wouldn't parse. ([#775](https://github.com/fossas/fossa-cli/pull/775))
+- Npm: Fixes an issue where analyzing `package-lock.json` would miss duplicate packages with different versions. ([#779](https://github.com/fossas/fossa-cli/pull/779))
+- Gradle: Projects with only a top-level `settings.gradle` file will now be detected. ([#785](https://github.com/fossas/fossa-cli/pull/785))
+
+## v3.0.16
+
+- Monorepo: Upload file data and licenses together during monorepo scans, speed up issue scans. ([#772](https://github.com/fossas/fossa-cli/pull/772))
+- Improves the overall performance and progress reporting of VSI scans. ([#765](https://github.com/fossas/fossa-cli/pull/765))
+- Rebar: Fix `rebar.config` parser failing on unneccessary escapes. ([#764](https://github.com/fossas/fossa-cli/pull/764))
+
+## v3.0.15
+
+- Improve archive upload logging. ([#761](https://github.com/fossas/fossa-cli/pull/761)) 
+
+## v3.0.14
+
+- Maven: Updates implementation to delineate classifier, and consequently maven dependencies with classifier can be scanned without failure in FOSSA. ([#755](https://github.com/fossas/fossa-cli/pull/755/))
+
+## v3.0.13
+
+- `package-lock.json` parser ignores name field. ([#757](https://github.com/fossas/fossa-cli/pull/757)) 
+
+## v3.0.12
+
+- log4j: Adds `fossa log4j` command to identify log4j dependencies. ([#744](https://github.com/fossas/fossa-cli/pull/744))
+
+## v3.0.11
+
+- Yarn: Fixes an issue, where entry missing `resolved` attribute in `yarn.lock` would throw exception. ([#741](https://github.com/fossas/fossa-cli/pull/741))
+
+## v3.0.10
+
+- Gradle: Uses ResolutionAPI for gradle analysis. ([#740](https://github.com/fossas/fossa-cli/pull/740/))
+- Cleans up duplicated internal hashing primitives ([#737](https://github.com/fossas/fossa-cli/pull/737))
+- Adds a prerequisite required for future VSI improvements ([#736](https://github.com/fossas/fossa-cli/pull/736))
+
+## v3.0.9
+
+- Makes experimental flags discoverable and documents them. ([#723](https://github.com/fossas/fossa-cli/pull/723))
+- Supports extracting `.tar.xz` files ([#734](https://github.com/fossas/fossa-cli/pull/734))
+- Supports extracting `.tar.bz2` files ([#734](https://github.com/fossas/fossa-cli/pull/734))
+- Adds explicit `xz` support for `rpm` files ([#735](https://github.com/fossas/fossa-cli/pull/735))
+- Adds `zstd` support for `rpm` files ([#735](https://github.com/fossas/fossa-cli/pull/735))
+- Adds a prerequisite required for future VSI improvements ([#730](https://github.com/fossas/fossa-cli/pull/730))
+
+## v3.0.8
+
+- Nuget: Fixes analysis performance when working with `project.assets.json` ([#733](https://github.com/fossas/fossa-cli/pull/733))
+
+## v3.0.7
+
+- Go: `go mod graph` is used as default tactic for gomod strategy. ([#707](https://github.com/fossas/fossa-cli/pull/707))
+
+## v3.0.6
+
+- Yarn: Fixes a bug with yarn v1 lock file analysis, where direct dependencies were not reported sometimes. ([#716](https://github.com/fossas/fossa-cli/pull/716))
+
+## v3.0.5
+
+- Nim: Adds support for dependency analysis using `nimble.lock` file. ([#711](https://github.com/fossas/fossa-cli/pull/711))
+
+## v3.0.4
+
+- Npm: Fixes a bug where dev dependencies were not included in result when using `--include-unused-deps` ([#710](https://github.com/fossas/fossa-cli/pull/710))
+
+## v3.0.3
+
+- Increases default timeout to 3600 seconds (1 hour) for commands listed below ([#712](https://github.com/fossas/fossa-cli/pull/712))
+  - `fossa test`
+  - `fossa container test`
+  - `fossa vps test`
+  - `fossa report`
+  - `fossa vps report`
+
+## v3.0.2
+
+- Nuget (projectassetsjson): Ignores project type dependencies in reporting ([#704](https://github.com/fossas/fossa-cli/pull/704))
+- Nuget (projectassetsjson): Fixes a bug, where indirect dependencies where appearing as direct dependencies([#704](https://github.com/fossas/fossa-cli/pull/704))
+
 ## v3.0.1
 
 - Deduplicates `vendored-dependencies` entries when possible, and provides a better error message when not. ([#689](https://github.com/fossas/fossa-cli/pull/689))
@@ -1704,7 +1835,7 @@ Built with go version go1.10 linux/amd64
 
 - 46d1dbd feat(go): Implement Go module discovery (#97)
 - b476653 fix(go): Do Go import tracing with go list instead of depth (#96)
-- 451ab20 README: Fix rendering of a link to https://fossa.io (#88)
+- 451ab20 README: Fix rendering of a link to `https://fossa.io` (#88)
 - 2893145 chore(cli): update help text
 - c285037 Merge branch 'master' of https://github.com/fossas/fossa-cli
 - d604f5b release(0.4.3): update readme and installer

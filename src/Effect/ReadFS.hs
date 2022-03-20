@@ -35,9 +35,16 @@ module Effect.ReadFS (
   readContentsToml,
   readContentsYaml,
   readContentsXML,
+
+  -- * File identity information
+  contentIsBinary,
+  DirID,
+  getIdentifier,
+  getIdentifier',
   module X,
 ) where
 
+import App.Support (reportDefectWithFileMsg)
 import Control.Algebra as X
 import Control.Carrier.Simple
 import Control.Effect.Diagnostics
@@ -47,6 +54,7 @@ import Control.Effect.Record.TH (deriveRecordable)
 import Control.Effect.Replay
 import Control.Effect.Replay.TH (deriveReplayable)
 import Control.Exception qualified as E
+import Control.Exception.Extra (safeCatch)
 import Control.Monad ((<=<))
 import Data.Aeson
 import Data.ByteString (ByteString)
@@ -62,9 +70,20 @@ import Path.IO qualified as PIO
 import Prettyprinter (indent, line, pretty, vsep)
 import System.Directory qualified as Directory
 import System.IO (IOMode (ReadMode), withFile)
+import System.PosixCompat.Files qualified as Posix
+import System.PosixCompat.Types (CDev (..), CIno (..))
 import Text.Megaparsec (Parsec, runParser)
 import Text.Megaparsec.Error (errorBundlePretty)
 import Toml qualified
+
+-- | A unique file identifier for a directory.
+-- Uniqueness is guaranteed within a single OS.
+data DirID = DirID {dirFileID :: Integer, dirDeviceID :: Integer} deriving (Show, Eq, Ord, Generic)
+
+instance ToJSON DirID
+instance RecordableValue DirID
+instance FromJSON DirID
+instance ReplayableValue DirID
 
 data ReadFSF a where
   ReadContentsBS' :: SomeBase File -> ReadFSF (Either ReadFSErr ByteString)
@@ -75,13 +94,14 @@ data ReadFSF a where
   ResolveFile' :: Path Abs Dir -> Text -> ReadFSF (Either ReadFSErr (Path Abs File))
   ResolveDir' :: Path Abs Dir -> Text -> ReadFSF (Either ReadFSErr (Path Abs Dir))
   ListDir :: Path Abs Dir -> ReadFSF (Either ReadFSErr ([Path Abs Dir], [Path Abs File]))
+  GetIdentifier :: Path Abs Dir -> ReadFSF (Either ReadFSErr DirID)
 
 type ReadFS = Simple ReadFSF
 
 data ReadFSErr
   = -- | A file couldn't be read. file, err
     FileReadError FilePath Text
-  | -- | A file's contents couldn't be parsed. TODO: ask user to help with this. file, err
+  | -- | A file's contents couldn't be parsed.
     FileParseError FilePath Text
   | -- | An IOException was thrown when resolving a file/directory
     ResolveError FilePath FilePath Text
@@ -103,7 +123,14 @@ deriving instance Ord (ReadFSF a)
 instance ToDiagnostic ReadFSErr where
   renderDiagnostic = \case
     FileReadError path err -> "Error reading file " <> pretty path <> ":" <> line <> indent 4 (pretty err)
-    FileParseError path err -> "Error parsing file " <> pretty path <> ":" <> line <> indent 4 (pretty err)
+    FileParseError path err ->
+      vsep
+        [ "Error parsing file: " <> pretty path <> "."
+        , ""
+        , indent 4 (pretty err)
+        , ""
+        , reportDefectWithFileMsg path
+        ]
     ResolveError base rel err ->
       "Error resolving a relative file:" <> line
         <> indent
@@ -166,6 +193,24 @@ listDir' = sendSimple . ListDir
 listDir :: (Has ReadFS sig m, Has Diagnostics sig m) => Path Abs Dir -> m ([Path Abs Dir], [Path Abs File])
 listDir dir = fromEither =<< listDir' dir
 
+-- | Get a unique identifier for a directory.
+-- This follows symlinks and the identifier will be the same regardless of the path.
+getIdentifier' :: Has ReadFS sig m => Path Abs Dir -> m (Either ReadFSErr DirID)
+getIdentifier' = sendSimple . GetIdentifier
+
+-- | Get a unique identifier for a directory.
+-- This follows symlinks and the identifier will be the same regardless of the path.
+getIdentifier :: (Has ReadFS sig m, Has Diagnostics sig m) => Path Abs Dir -> m DirID
+getIdentifier path = fromEither =<< getIdentifier' path
+
+-- | Determine if a file is binary using the same method as git:
+-- "is there a zero byte in the first 8000 bytes of the file"
+contentIsBinary :: (Has ReadFS sig m, Has Diagnostics sig m) => Path Abs File -> m Bool
+contentIsBinary file = do
+  attemptedContent <- readContentsBSLimit file 8000
+  content <- fromEither attemptedContent
+  pure $ BS.elem 0 content
+
 type Parser = Parsec Void Text
 
 -- | Read from a file, parsing its contents
@@ -173,7 +218,7 @@ readContentsParser :: forall a sig m. (Has ReadFS sig m, Has Diagnostics sig m) 
 readContentsParser parser file = context ("Parsing file '" <> toText (fromAbsFile file) <> "'") $ do
   contents <- readContentsText file
   case runParser parser (fromAbsFile file) contents of
-    Left err -> fatal (FileParseError (fromAbsFile file) (toText (errorBundlePretty err)))
+    Left err -> fatal $ FileParseError (fromAbsFile file) (toText (errorBundlePretty err))
     Right a -> pure a
 
 -- | Read JSON from a file
@@ -181,14 +226,14 @@ readContentsJson :: (FromJSON a, Has ReadFS sig m, Has Diagnostics sig m) => Pat
 readContentsJson file = context ("Parsing JSON file '" <> toText (fromAbsFile file) <> "'") $ do
   contents <- readContentsBS file
   case eitherDecodeStrict contents of
-    Left err -> fatal (FileParseError (fromAbsFile file) (toText err))
+    Left err -> fatal $ FileParseError (fromAbsFile file) (toText err)
     Right a -> pure a
 
 readContentsToml :: (Has ReadFS sig m, Has Diagnostics sig m) => Toml.TomlCodec a -> Path Abs File -> m a
 readContentsToml codec file = context ("Parsing TOML file '" <> toText (fromAbsFile file) <> "'") $ do
   contents <- readContentsText file
   case Toml.decode codec contents of
-    Left err -> fatal (FileParseError (fromAbsFile file) (Toml.prettyTomlDecodeErrors err))
+    Left err -> fatal $ FileParseError (fromAbsFile file) (Toml.prettyTomlDecodeErrors err)
     Right a -> pure a
 
 -- | Read YAML from a file
@@ -196,7 +241,7 @@ readContentsYaml :: (FromJSON a, Has ReadFS sig m, Has Diagnostics sig m) => Pat
 readContentsYaml file = context ("Parsing YAML file '" <> toText (fromAbsFile file) <> "'") $ do
   contents <- readContentsBS file
   case decodeEither' contents of
-    Left err -> fatal (FileParseError (fromAbsFile file) (toText $ prettyPrintParseException err))
+    Left err -> fatal $ FileParseError (fromAbsFile file) (toText $ prettyPrintParseException err)
     Right a -> pure a
 
 -- | Read XML from a file
@@ -204,7 +249,7 @@ readContentsXML :: (FromXML a, Has ReadFS sig m, Has Diagnostics sig m) => Path 
 readContentsXML file = context ("Parsing XML file '" <> toText (fromAbsFile file) <> "'") $ do
   contents <- readContentsText file
   case parseXML contents of
-    Left err -> fatal (FileParseError (fromAbsFile file) (xmlErrorPretty err))
+    Left err -> fatal $ FileParseError (fromAbsFile file) (xmlErrorPretty err)
     Right a -> pure a
 
 type ReadFSIOC = SimpleC ReadFSF
@@ -229,6 +274,16 @@ runReadFSIO = interpret $ \case
   ListDir dir -> do
     PIO.listDir dir
       `catchingIO` ListDirError (toFilePath dir)
+  GetIdentifier dir -> do
+    (extractIdentifier <$> Posix.getFileStatus (toFilePath dir))
+      `catchingIO` FileReadError (toFilePath dir)
+    where
+      extractIdentifier :: Posix.FileStatus -> DirID
+      extractIdentifier status =
+        let (CIno fileID) = Posix.fileID status
+            (CDev devID) = Posix.deviceID status
+         in DirID{dirFileID = toInteger fileID, dirDeviceID = toInteger devID}
+
   -- NB: these never throw
   DoesFileExist file -> sendIO (Directory.doesFileExist (fromSomeFile file))
   DoesDirExist dir -> sendIO (Directory.doesDirectoryExist (fromSomeDir dir))
@@ -237,4 +292,4 @@ readContentsBSLimit' :: SomeBase File -> Int -> IO ByteString
 readContentsBSLimit' file limit = withFile (fromSomeFile file) ReadMode $ \handle -> BS.hGetSome handle limit
 
 catchingIO :: Has (Lift IO) sig m => IO a -> (Text -> ReadFSErr) -> m (Either ReadFSErr a)
-catchingIO io mangle = sendIO $ E.catch (Right <$> io) (\(e :: E.IOException) -> pure (Left (mangle (toText (show e)))))
+catchingIO io mangle = safeCatch (Right <$> sendIO io) (\(e :: E.IOException) -> pure (Left (mangle (toText (show e)))))

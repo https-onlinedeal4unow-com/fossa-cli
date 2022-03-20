@@ -137,7 +137,7 @@ findProjects = walk' $ \dir _ files -> do
 mkProject :: CabalProject -> DiscoveredProject CabalProject
 mkProject project =
   DiscoveredProject
-    { projectType = "cabal"
+    { projectType = CabalProjectType
     , projectBuildTargets = mempty
     , projectPath = cabalDir project
     , projectData = project
@@ -195,7 +195,7 @@ toDependency plan =
 analyze :: (Has Exec sig m, Has ReadFS sig m, Has Diagnostics sig m) => CabalProject -> m DependencyResults
 analyze project = do
   let dir = cabalDir project
-  _ <- execThrow dir cabalGenPlanCmd
+  _ <- errCtx FailedToGenCabalPlan $ execThrow dir cabalGenPlanCmd
   plans <- readContentsJson @BuildPlan (dir </> cabalPlanFilePath)
   graph <- context "Building dependency graph" $ buildGraph plans
   pure $
@@ -204,3 +204,7 @@ analyze project = do
       , dependencyGraphBreadth = Complete
       , dependencyManifestFiles = cabalFiles project
       }
+
+data FailedToGenCabalPlan = FailedToGenCabalPlan
+instance ToDiagnostic FailedToGenCabalPlan where
+  renderDiagnostic _ = "We could not dry run cabal build for dependency analysis."

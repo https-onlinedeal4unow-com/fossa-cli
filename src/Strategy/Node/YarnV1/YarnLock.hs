@@ -6,7 +6,7 @@ module Strategy.Node.YarnV1.YarnLock (
   mangleParseErr,
 ) where
 
-import Control.Effect.Diagnostics (Diagnostics, Has, context, tagError)
+import Control.Effect.Diagnostics (Diagnostics, Has, context, tagError, warn)
 import Data.Foldable (for_, traverse_)
 import Data.List.NonEmpty qualified as NE
 import Data.Maybe (catMaybes)
@@ -35,9 +35,7 @@ import Effect.Grapher (
 import Effect.Logger (
   AnsiStyle,
   Doc,
-  Logger,
   hsep,
-  logWarn,
   pretty,
  )
 import Effect.ReadFS (ReadFS, ReadFSErr (FileParseError), readContentsText)
@@ -50,7 +48,6 @@ import Yarn.Lock.Types qualified as YL
 analyze ::
   forall m sig.
   ( Has Diagnostics sig m
-  , Has Logger sig m
   , Has ReadFS sig m
   ) =>
   Path Abs File ->
@@ -63,7 +60,7 @@ analyze yarnFile flatdeps = do
   context "Building yarn.lock package graph" $ buildGraph parsed flatdeps
 
 mangleParseErr :: FilePath -> YL.LockfileError -> ReadFSErr
-mangleParseErr path = FileParseError path . YL.prettyLockfileError
+mangleParseErr path err = FileParseError path (YL.prettyLockfileError err)
 
 data YarnV1Label
   = NodeEnvironment DepEnvironment
@@ -79,18 +76,17 @@ data YarnV1Package = YarnV1Package
 buildGraph ::
   forall m sig.
   ( Has Diagnostics sig m
-  , Has Logger sig m
   ) =>
   YL.Lockfile ->
   FlatDeps ->
   m (Graphing Dependency)
 buildGraph lockfile FlatDeps{..} = fmap hydrateDepEnvs . withLabeling toDependency $
-  for_ (map firstKey $ MKM.toList lockfile) $ \(key, pkg) -> do
+  for_ (map extractPkgTriple $ MKM.toList lockfile) $ \(pkgName, keys, pkg) -> do
     let parent :: YarnV1Package
-        parent = pairToPackage key pkg
+        parent = YarnV1Package pkgName $ YL.version pkg
 
-        keyAsNodePackage :: NodePackage
-        keyAsNodePackage = toNodePackage key
+        allKeysAsNodePackages :: [NodePackage]
+        allKeysAsNodePackages = toNodePackage <$> keys
 
         childrenSpecs :: [YL.PackageKey]
         childrenSpecs = YL.dependencies pkg
@@ -106,7 +102,7 @@ buildGraph lockfile FlatDeps{..} = fmap hydrateDepEnvs . withLabeling toDependen
     -- Add edges from current parent
     traverse_ (edge parent) children
     let promote env pkgSet =
-          if keyAsNodePackage `Set.member` pkgSet
+          if any (`Set.member` pkgSet) allKeysAsNodePackages
             then do
               direct parent
               label parent $ NodeEnvironment env
@@ -116,13 +112,13 @@ buildGraph lockfile FlatDeps{..} = fmap hydrateDepEnvs . withLabeling toDependen
     promote EnvProduction $ unTag @Production directDeps
     promote EnvDevelopment $ unTag @Development devDeps
 
-getLocations :: YL.Remote -> [Text]
+getLocations :: Maybe YL.Remote -> [Text]
 getLocations = \case
-  YL.FileRemote url _ -> [url]
-  YL.FileRemoteNoIntegrity url -> [url]
-  YL.GitRemote url rev -> [url <> "@" <> rev]
-  YL.DirectoryLocal dirpath -> [dirpath]
-  YL.DirectoryLocalSymLinked dirpath -> [dirpath]
+  Just (YL.FileRemote url _) -> [url]
+  Just (YL.FileRemoteNoIntegrity url) -> [url]
+  Just (YL.GitRemote url rev) -> [url <> "@" <> rev]
+  Just (YL.DirectoryLocal dirpath) -> [dirpath]
+  Just (YL.DirectoryLocalSymLinked dirpath) -> [dirpath]
   _ -> []
 
 toDependency :: YarnV1Package -> Set YarnV1Label -> Dependency
@@ -145,10 +141,10 @@ toDependency YarnV1Package{..} = foldr applyLabel start
 toNodePackage :: YL.PackageKey -> NodePackage
 toNodePackage key = NodePackage (extractFullName key) (YL.npmVersionSpec key)
 
-resolveVersion :: Has Logger sig m => YL.Lockfile -> YL.PackageKey -> m (Maybe YarnV1Package)
+resolveVersion :: Has Diagnostics sig m => YL.Lockfile -> YL.PackageKey -> m (Maybe YarnV1Package)
 resolveVersion lockfile key = logMaybePackage key $ pairToPackage key <$> MKM.lookup key lockfile
 
-logMaybePackage :: Has Logger sig m => YL.PackageKey -> Maybe a -> m (Maybe a)
+logMaybePackage :: Has Diagnostics sig m => YL.PackageKey -> Maybe a -> m (Maybe a)
 logMaybePackage key something = do
   case something of
     -- In some (currently unknown) cases, we don't find the key we expect to find.
@@ -156,7 +152,7 @@ logMaybePackage key something = do
     -- partially succeed anyway, so we just log a warning for now.
     -- If a valid case is discovered, it's likely a bug elsewhere (perhaps
     -- in the 'yarn-lock' package), and should be fixed.
-    Nothing -> logWarn $ missingResolvedVersionErrorMsg key
+    Nothing -> warn $ missingResolvedVersionErrorMsg key
     _ -> pure ()
   pure something
 
@@ -173,8 +169,8 @@ missingResolvedVersionErrorMsg key =
 pairToPackage :: YL.PackageKey -> YL.Package -> YarnV1Package
 pairToPackage key pkg = YarnV1Package (extractFullName key) (YL.version pkg)
 
-firstKey :: (NE.NonEmpty a, b) -> (a, b)
-firstKey (neList, pkg) = (NE.head neList, pkg)
+extractPkgTriple :: (NE.NonEmpty YL.PackageKey, b) -> (Text, [YL.PackageKey], b)
+extractPkgTriple (neList, pkg) = (extractFullName $ NE.head neList, NE.toList neList, pkg)
 
 extractFullName :: YL.PackageKey -> Text
 extractFullName key = case YL.name key of

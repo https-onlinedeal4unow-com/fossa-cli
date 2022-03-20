@@ -27,7 +27,10 @@ module Graphing (
   -- * Accessing graph elements
   directList,
   vertexList,
+  edgesList,
   toAdjacencyMap,
+  getRootsOf,
+  hasPredecessors,
 
   -- * Manipulating a Graphing
   gmap,
@@ -37,6 +40,7 @@ module Graphing (
   filter,
   shrink,
   shrinkSingle,
+  shrinkWithoutPromotionToDirect,
   pruneUnreachable,
   stripRoot,
   promoteToDirect,
@@ -47,6 +51,7 @@ module Graphing (
   fromList,
   toList,
   unfold,
+  unfoldDeep,
 ) where
 
 import Algebra.Graph.AdjacencyMap (AdjacencyMap)
@@ -54,6 +59,8 @@ import Algebra.Graph.AdjacencyMap qualified as AM
 import Algebra.Graph.AdjacencyMap.Algorithm qualified as AMA
 import Algebra.Graph.AdjacencyMap.Extra qualified as AME
 import Data.Bifunctor (bimap)
+import Data.List (foldl')
+import Data.Maybe (mapMaybe)
 import Data.Set qualified as Set
 import Prelude hiding (filter)
 import Prelude qualified
@@ -129,6 +136,38 @@ shrink f = Graphing . AME.shrink f' . unGraphing
     f' Root = True
     f' (Node a) = f a
 
+-- | Unlike @shrink@ when root vertices are deleted, their successor are not promoted as direct
+-- if they have any predecessors.
+--
+--  Example:
+--
+--   1 -> 2 -> 5 -> 6
+--        \       \
+--         \       7
+--   3 ----> 4
+--    \
+--     8
+--
+--  When node (3) is shrinked, 8 will be promoted to direct, and 4 will be not be promoted as direct.
+shrinkWithoutPromotionToDirect :: forall a. Ord a => (a -> Bool) -> Graphing a -> Graphing a
+shrinkWithoutPromotionToDirect f gr = foldl' withoutEdgeToRoot shrinkedGraph jumpedDirects
+  where
+    shrinkedGraph :: Graphing a
+    shrinkedGraph = shrink f gr
+
+    -- Identify direct nodes after shrinking the graph on predicate,
+    -- that were not part of direct nodes previously and have predecessors.
+    jumpedDirects :: [a]
+    jumpedDirects =
+      Set.toList $
+        Set.filter (hasPredecessors shrinkedGraph) $
+          Set.difference
+            (Set.fromList . directList $ shrinkedGraph)
+            (Set.fromList . directList $ gr)
+
+    withoutEdgeToRoot :: Graphing a -> a -> Graphing a
+    withoutEdgeToRoot g n = Graphing . AM.removeEdge Root (Node n) $ unGraphing g
+
 -- | Delete a vertex in a Grahing, preserving the overall structure by rewiring edges through the delted vertex.
 --
 -- For example, given the graph @1 -> 2 -> 3 -> 4@ and applying @shrinkSingle 3@, we return the graph
@@ -194,6 +233,10 @@ directList (Graphing gr) = [node | Node node <- Set.toList (AM.postSet Root gr)]
 vertexList :: Graphing ty -> [ty]
 vertexList gr = [node | Node node <- AM.vertexList (unGraphing gr)]
 
+-- | Gets a list of edges in the Graphing.
+edgesList :: Ord ty => Graphing ty -> [(ty, ty)]
+edgesList gr = AM.edgeList $ toAdjacencyMap gr
+
 -- | Convert to the underlying AdjacencyMap (without the Root element)
 toAdjacencyMap :: Ord ty => Graphing ty -> AM.AdjacencyMap ty
 toAdjacencyMap = AM.induceJust . AM.gmap convert . unGraphing
@@ -242,6 +285,31 @@ unfold seed getDeps toDependency = directs directNodes <> edges builtEdges
       let children = getDeps node
       map (node,) children ++ edgesFrom children
 
+-- | @unfoldDeep dep getDeps toDependency@ unfolds a graph, given:
+--
+-- - The @deep@ dependencies in the graph
+--
+-- - A way to @getDeps@ for a dependency
+--
+-- - A way to convert a dependency @toDependency@
+--
+-- __unfoldDeep does not work for recursive inputs__
+-- __unfoldDeep marks all dependencies as deeps__
+unfoldDeep :: forall dep res. Ord res => [dep] -> (dep -> [dep]) -> (dep -> res) -> Graphing res
+unfoldDeep seed getDeps toDependency = deeps directNodes <> edges builtEdges
+  where
+    directNodes :: [res]
+    directNodes = map toDependency seed
+
+    builtEdges :: [(res, res)]
+    builtEdges = map (bimap toDependency toDependency) (edgesFrom seed)
+
+    edgesFrom :: [dep] -> [(dep, dep)]
+    edgesFrom nodes = do
+      node <- nodes
+      let children = getDeps node
+      map (node,) children ++ edgesFrom children
+
 -- | Remove unreachable vertices from the graph
 --
 -- A vertex is reachable if there's a path from the "direct" vertices to that vertex
@@ -276,3 +344,24 @@ fromAdjacencyMap = Graphing . AM.gmap Node
 -- Alias for 'vertexList'
 toList :: Graphing ty -> [ty]
 toList = vertexList
+
+-- | Gets direct nodes which can reach provided node.
+getRootsOf :: forall ty. (Ord ty) => Graphing ty -> ty -> [ty]
+getRootsOf (Graphing gr) from = Prelude.filter (/= from) $ mapMaybe withoutRoots (Prelude.filter predecessorIsRoot reachableNodes)
+  where
+    reachableNodes :: [Node ty]
+    reachableNodes = AMA.reachable (Node from) (AM.transpose gr)
+
+    predecessorIsRoot :: Node ty -> Bool
+    predecessorIsRoot node = Root `Set.member` AM.preSet node gr
+
+    withoutRoots :: Node a -> Maybe a
+    withoutRoots (Node a) = Just a
+    withoutRoots (Root) = Nothing
+
+hasPredecessors :: forall ty. (Ord ty) => Graphing ty -> ty -> Bool
+hasPredecessors (Graphing gr) from = not $ Set.null $ Set.filter (withoutRoots) $ AM.preSet (Node from) gr
+  where
+    withoutRoots :: Node a -> Bool
+    withoutRoots (Node _) = True
+    withoutRoots (Root) = False

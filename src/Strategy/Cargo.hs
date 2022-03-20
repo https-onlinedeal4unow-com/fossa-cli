@@ -1,6 +1,7 @@
 module Strategy.Cargo (
   discover,
   CargoMetadata (..),
+  CargoProject (..),
   NodeDependency (..),
   NodeDepKind (..),
   PackageId (..),
@@ -13,20 +14,71 @@ module Strategy.Cargo (
 ) where
 
 import App.Fossa.Analyze.Types (AnalyzeProject, analyzeProject)
-import Control.Effect.Diagnostics
-import Data.Aeson.Types
+import App.Pathfinder.Types (LicenseAnalyzeProject (licenseAnalyzeProject))
+import Control.Effect.Diagnostics (
+  Diagnostics,
+  Has,
+  ToDiagnostic,
+  context,
+  errCtx,
+  run,
+  warn,
+ )
+import Data.Aeson.Types (
+  FromJSON (parseJSON),
+  Parser,
+  ToJSON,
+  withObject,
+  (.:),
+  (.:?),
+ )
 import Data.Foldable (for_, traverse_)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (catMaybes, isJust)
 import Data.Set (Set)
+import Data.String.Conversion (toText)
 import Data.Text qualified as Text
-import Discovery.Walk
-import Effect.Exec
-import Effect.Grapher
-import Effect.ReadFS (ReadFS)
+import Diag.Diagnostic (renderDiagnostic)
+import Discovery.Walk (
+  WalkStep (WalkContinue, WalkSkipAll),
+  findFileNamed,
+  walk',
+ )
+import Effect.Exec (
+  AllowErr (Never),
+  Command (..),
+  Exec,
+  execJson,
+  execThrow,
+ )
+import Effect.Grapher (
+  LabeledGrapher,
+  direct,
+  edge,
+  label,
+  withLabeling,
+ )
+import Effect.ReadFS (ReadFS, readContentsToml)
 import GHC.Generics (Generic)
 import Graphing (Graphing, stripRoot)
-import Path
-import Types
+import Path (Abs, Dir, File, Path, parent, parseRelFile, toFilePath, (</>))
+import Prettyprinter (Pretty (pretty))
+import Toml (TomlCodec, dioptional, diwrap, (.=))
+import Toml qualified
+import Types (
+  DepEnvironment (EnvDevelopment, EnvProduction),
+  DepType (CargoType),
+  Dependency (..),
+  DependencyResults (..),
+  DiscoveredProject (..),
+  DiscoveredProjectType (CargoProjectType),
+  GraphBreadth (Complete),
+  License (License),
+  LicenseResult (LicenseResult, licenseFile, licensesFound),
+  LicenseType (LicenseFile, LicenseSPDX, UnknownType),
+  VerConstraint (CEq),
+  insertEnvironment,
+ )
 
 newtype CargoLabel
   = CargoDepKind DepEnvironment
@@ -155,10 +207,76 @@ instance ToJSON CargoProject
 instance AnalyzeProject CargoProject where
   analyzeProject _ = getDeps
 
+data CargoPackage = CargoPackage
+  { license :: Maybe Text.Text
+  , -- | Path relative to Cargo.toml containing the license
+    cargoLicenseFile :: Maybe FilePath
+  }
+  deriving (Eq, Show)
+
+cargoPackageCodec :: TomlCodec CargoPackage
+cargoPackageCodec =
+  CargoPackage
+    <$> dioptional (Toml.text "license") .= license
+    <*> dioptional (Toml.string "license-file") .= cargoLicenseFile
+
+-- |Representation of a Cargo.toml file. See
+-- [here](https://doc.rust-lang.org/cargo/reference/manifest.html)
+-- for a description of this format.
+newtype CargoToml = CargoToml
+  {cargoPackage :: CargoPackage}
+  deriving (Eq, Show)
+
+cargoTomlCodec :: TomlCodec CargoToml
+cargoTomlCodec = diwrap (Toml.table cargoPackageCodec "package")
+-- ^^ The above is a bit obscure. It's generating a TomlCodec CargoPackage and
+-- then using 'diwrap'/Coercible to make a TomlCodec CargoToml.  I can't use
+-- 'CargoToml <$>' because TomlCodec aliases (Codec a a) and only (Codec a)
+-- has a Functor instance, so I'd end up with a (Codec CargoPackage CargoToml).
+
+instance LicenseAnalyzeProject CargoProject where
+  licenseAnalyzeProject = analyzeLicenses . cargoToml
+
+-- |Analyze a Cargo.toml for license information. The format is documented
+-- (here)[https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields]
+analyzeLicenses :: (Has ReadFS sig m, Has Diagnostics sig m) => Path Abs File -> m [LicenseResult]
+analyzeLicenses tomlPath = do
+  pkg <- cargoPackage <$> readContentsToml cargoTomlCodec tomlPath
+  licensePathText <- maybe (pure Nothing) mkLicensePath (cargoLicenseFile pkg)
+
+  -- The license-file field in Cargo.toml is relative to the dir of the
+  -- Cargo.toml file. Generate an absolute path to license-file.
+  let maybeLicense = license pkg
+  let licenseCon = selectLicenseCon <$> maybeLicense
+  pure
+    [ LicenseResult
+        { licenseFile = toFilePath tomlPath
+        , licensesFound =
+            catMaybes
+              [ License <$> licenseCon <*> maybeLicense
+              , License LicenseFile <$> licensePathText
+              ]
+        }
+    ]
+  where
+    mkLicensePath path = case parseRelFile path of
+      Just p -> pure . Just . toText $ parent tomlPath </> p
+      Nothing ->
+        warn ("Cannot parse 'license-file' value: " <> path)
+          >> pure Nothing
+
+    textElem c = isJust . Text.findIndex (== c)
+    -- Old versions of Cargo allow '/' as a separator between SPDX values in
+    -- 'license'. In that case 'license' can't be treated as a LicenseSPDX.
+    selectLicenseCon licenseText =
+      if textElem '/' licenseText
+        then UnknownType
+        else LicenseSPDX
+
 mkProject :: CargoProject -> DiscoveredProject CargoProject
 mkProject project =
   DiscoveredProject
-    { projectType = "cargo"
+    { projectType = CargoProjectType
     , projectBuildTargets = mempty
     , projectPath = cargoDir project
     , projectData = project
@@ -166,7 +284,7 @@ mkProject project =
 
 getDeps :: (Has Exec sig m, Has Diagnostics sig m) => CargoProject -> m DependencyResults
 getDeps project = do
-  (graph, graphBreadth) <- context "Cargo" . context "Dynamic analysis" . analyze . cargoDir $ project
+  (graph, graphBreadth) <- context "Cargo" . context "Dynamic analysis" . analyze $ project
   pure $
     DependencyResults
       { dependencyGraph = graph
@@ -192,14 +310,22 @@ cargoMetadataCmd =
 
 analyze ::
   (Has Exec sig m, Has Diagnostics sig m) =>
-  Path Abs Dir ->
+  CargoProject ->
   m (Graphing Dependency, GraphBreadth)
-analyze manifestDir = do
-  _ <- context "Generating lockfile" $ execThrow manifestDir cargoGenLockfileCmd
-  meta <- execJson @CargoMetadata manifestDir cargoMetadataCmd
+analyze (CargoProject manifestDir manifestFile) = do
+  _ <- context "Generating lockfile" $ errCtx (FailedToGenLockFile manifestFile) $ execThrow manifestDir cargoGenLockfileCmd
+  meta <- errCtx (FailedToRetrieveCargoMetadata manifestFile) $ execJson @CargoMetadata manifestDir cargoMetadataCmd
   --
   graph <- context "Building dependency graph" $ pure (buildGraph meta)
   pure (graph, Complete)
+
+newtype FailedToGenLockFile = FailedToGenLockFile (Path Abs File)
+instance ToDiagnostic FailedToGenLockFile where
+  renderDiagnostic (FailedToGenLockFile path) = pretty $ "Could not generate lock file for cargo manifest: " <> (show path)
+
+newtype FailedToRetrieveCargoMetadata = FailedToRetrieveCargoMetadata (Path Abs File)
+instance ToDiagnostic FailedToRetrieveCargoMetadata where
+  renderDiagnostic (FailedToRetrieveCargoMetadata path) = pretty $ "Could not retrieve machine readable cargo metadata for: " <> (show path)
 
 toDependency :: PackageId -> Set CargoLabel -> Dependency
 toDependency pkg =

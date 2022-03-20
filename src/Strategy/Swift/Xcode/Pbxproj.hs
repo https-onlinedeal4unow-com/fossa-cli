@@ -8,16 +8,20 @@ module Strategy.Swift.Xcode.Pbxproj (
   swiftPackageReferencesOf,
 ) where
 
-import Control.Effect.Diagnostics (Diagnostics, context)
+import Control.Effect.Diagnostics (Diagnostics, context, errCtx, fatalText, recover, warnOnErr)
 import Data.Map (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
 import Data.Set (fromList, member)
 import Data.Text (Text)
 import DepTypes (DepType (GitType, SwiftType), Dependency (..))
+import Diag.Common (MissingDeepDeps (MissingDeepDeps))
 import Effect.ReadFS (Has, ReadFS, readContentsJson, readContentsParser)
 import Graphing (Graphing, deeps, directs, promoteToDirect)
 import Path
+import Strategy.Swift.Errors (
+  MissingPackageResolvedFile (MissingPackageResolvedFile),
+ )
 import Strategy.Swift.PackageResolved (SwiftPackageResolvedFile, resolvedDependenciesOf)
 import Strategy.Swift.PackageSwift (
   SwiftPackageGitDepRequirement (..),
@@ -107,7 +111,12 @@ analyzeXcodeProjForSwiftPkg xcodeProjFile resolvedFile = do
       readContentsParser parsePbxProj xcodeProjFile
 
   packageResolvedContent <- case resolvedFile of
-    Nothing -> pure Nothing
+    Nothing ->
+      do
+        recover
+          . warnOnErr MissingDeepDeps
+          . errCtx (MissingPackageResolvedFile xcodeProjFile)
+          $ fatalText "Package.resolved file was not discovered"
     Just packageResolved ->
       context "Identifying dependencies in Package.resolved" $
         readContentsJson packageResolved

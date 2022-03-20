@@ -15,67 +15,52 @@
 -- - Gradle init scripts: https://docs.gradle.org/current/userguide/init_scripts.html
 module Strategy.Gradle (
   discover,
-  buildGraph,
-  JsonDep (..),
-  PackageName (..),
-  ConfigName (..),
+  GradleProject,
 ) where
 
-import App.Fossa.Analyze.Types (AnalyzeExperimentalPreferences (..), AnalyzeProject, analyzeProject)
-import Control.Algebra (Has, run)
+import App.Fossa.Analyze.Types (AnalyzeProject, analyzeProject)
+import App.Fossa.Config.Analyze (ExperimentalAnalyzeConfig (allowedGradleConfigs))
+import Control.Algebra (Has)
+import Control.Carrier.Diagnostics (warnOnErr)
 import Control.Carrier.Reader (Reader)
-import Control.Effect.Diagnostics (
-  Diagnostics,
-  context,
-  errorBoundary,
-  fatal,
-  renderFailureBundle,
-  (<||>),
- )
+import Control.Effect.Diagnostics (Diagnostics, context, errCtx, fatal, recover, (<||>))
 import Control.Effect.Lift (Lift, sendIO)
 import Control.Effect.Path (withSystemTempDir)
 import Control.Effect.Reader (asks)
-import Data.Aeson (FromJSON (..), ToJSON, Value (..), decodeStrict, withObject, (.:))
-import Data.Aeson.Types (Parser, unexpected)
+import Data.Aeson (ToJSON)
 import Data.ByteString (ByteString)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as BL
 import Data.FileEmbed (embedFile)
-import Data.Foldable (find, for_)
+import Data.Foldable (find)
 import Data.List (isPrefixOf)
-import Data.Map.Strict (Map)
-import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (mapMaybe)
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.Set.NonEmpty (nonEmpty, toSet)
-import Data.String.Conversion (decodeUtf8, encodeUtf8, toString, toText)
+import Data.String.Conversion (decodeUtf8, toString, toText)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import DepTypes (
-  DepEnvironment (..),
-  DepType (MavenType, SubprojectType),
   Dependency (..),
-  VerConstraint (CEq),
-  insertEnvironment,
  )
 import Discovery.Walk (WalkStep (..), fileName, walk')
 import Effect.Exec (AllowErr (..), Command (..), Exec, execThrow)
-import Effect.Grapher (LabeledGrapher, direct, edge, label, withLabeling)
-import Effect.Logger (Logger, logWarn)
+import Effect.Logger (Logger, Pretty (pretty), logDebug)
 import Effect.ReadFS (ReadFS, doesFileExist)
 import GHC.Generics (Generic)
 import Graphing (Graphing)
 import Path (Abs, Dir, File, Path, fromAbsDir, parent, parseRelFile, (</>))
-import Strategy.Android.Util (isDefaultAndroidDevConfig, isDefaultAndroidTestConfig)
+import Strategy.Gradle.Common (
+  ConfigName (..),
+  getDebugMessages,
+ )
+import Strategy.Gradle.Errors (FailedToListProjects (FailedToListProjects), FailedToRunGradleAnalysis (FailedToRunGradleAnalysis), GradleWrapperFailed (GradleWrapperFailed))
+import Strategy.Gradle.ResolutionApi qualified as ResolutionApi
 import System.FilePath qualified as FilePath
-import Types (BuildTarget (..), DependencyResults (..), DiscoveredProject (..), FoundTargets (..), GraphBreadth (..))
+import Types (BuildTarget (..), DependencyResults (..), DiscoveredProject (..), DiscoveredProjectType (GradleProjectType), FoundTargets (..), GraphBreadth (..))
 
-newtype ConfigName = ConfigName {unConfigName :: Text} deriving (Eq, Ord, Show, FromJSON)
-newtype GradleLabel = Env DepEnvironment deriving (Eq, Ord, Show)
-newtype PackageName = PackageName {unPackageName :: Text} deriving (Eq, Ord, Show, FromJSON)
-
--- Run the init script on a set of subprojects. Note that this runs the
+-- |Run the init script on a set of subprojects. Note that this runs the
 -- `:jsonDeps` task on every subproject in one command. This is helpful for
 -- performance reasons, because Gradle has a slow startup on each invocation.
 gradleJsonDepsCmdTargets :: FilePath -> Set BuildTarget -> Text -> Command
@@ -86,7 +71,7 @@ gradleJsonDepsCmdTargets initScriptFilepath targets baseCmd =
     , cmdAllowErr = Never
     }
 
--- Run the init script on a root project.
+-- |Run the init script on a root project.
 gradleJsonDepsCmd :: FilePath -> Text -> Command
 gradleJsonDepsCmd initScriptFilepath baseCmd =
   Command
@@ -100,7 +85,6 @@ discover ::
   , Has ReadFS sig m
   , Has Diagnostics sig m
   , Has Exec sig m
-  , Has Logger sig m
   ) =>
   Path Abs Dir ->
   m [DiscoveredProject GradleProject]
@@ -108,16 +92,18 @@ discover dir = context "Gradle" $ do
   found <- context "Finding projects" $ findProjects dir
   pure $ mkProject <$> found
 
--- Run a Gradle command in a specific working directory, while correctly trying
--- Gradle wrappers.
+-- |Run a Gradle command in a specific working directory, while correctly trying
+--Gradle wrappers.
 runGradle :: (Has ReadFS sig m, Has Exec sig m, Has Diagnostics sig m) => Path Abs Dir -> (Text -> Command) -> m BL.ByteString
-runGradle dir cmd =
-  do
-    walkUpDir dir "gradlew" >>= execThrow dir . cmd . toText
-    <||> (walkUpDir dir "gradlew.bat" >>= execThrow dir . cmd . toText)
-    <||> execThrow dir (cmd "gradle")
+runGradle dir cmd = gradleWrapper <||> gradleBinary
+  where
+    gradleBinary :: (Has ReadFS sig m, Has Exec sig m, Has Diagnostics sig m) => m BL.ByteString
+    gradleBinary = execThrow dir (cmd "gradle")
 
--- Search upwards in a directory for the existence of the supplied file.
+    gradleWrapper :: (Has ReadFS sig m, Has Exec sig m, Has Diagnostics sig m) => m BL.ByteString
+    gradleWrapper = warnOnErr GradleWrapperFailed $ (walkUpDir dir "gradlew" >>= execThrow dir . cmd . toText) <||> (walkUpDir dir "gradlew.bat" >>= execThrow dir . cmd . toText)
+
+-- |Search upwards in a directory for the existence of the supplied file.
 walkUpDir :: (Has ReadFS sig m, Has Diagnostics sig m) => Path Abs Dir -> Text -> m (Path Abs File)
 walkUpDir dir filename = do
   relFile <- case parseRelFile $ toString filename of
@@ -142,28 +128,34 @@ walkUpDir dir filename = do
 -- This is to avoid invoking Gradle again for each subproject, which would be
 -- slow (because of Gradle's startup time) and possibly wrong (because
 -- subprojects need to resolve dependency constraints together).
-findProjects :: (Has Exec sig m, Has Logger sig m, Has ReadFS sig m, Has Diagnostics sig m) => Path Abs Dir -> m [GradleProject]
+findProjects :: (Has Exec sig m, Has ReadFS sig m, Has Diagnostics sig m) => Path Abs Dir -> m [GradleProject]
 findProjects = walk' $ \dir _ files -> do
-  case find (\f -> "build.gradle" `isPrefixOf` fileName f) files of
+  let isProjectFile f =
+        any
+          (`isPrefixOf` fileName f)
+          [ "build.gradle"
+          , "settings.gradle"
+          ]
+
+  case find isProjectFile files of
     Nothing -> pure ([], WalkContinue)
     Just buildFile -> do
       projectsStdout <-
-        errorBoundary
+        recover
+          . warnOnErr (FailedToListProjects dir)
           . context ("Listing gradle projects at '" <> toText dir <> "'")
           $ runGradle dir gradleProjectsCmd
 
       case projectsStdout of
-        Left err -> do
-          logWarn $ renderFailureBundle err
-          -- Nearly all Gradle projects have a multi-module structure with a
-          -- top-level root project, and subdirectories contain subprojects of
-          -- the top-level root project.
-          --
-          -- If Gradle exits non-zero when invoked in the root project, it will
-          -- almost certainly exit non-zero in subprojects, so there's no point
-          -- in looking for subprojects in this subtree.
-          pure ([], WalkSkipAll)
-        Right result -> do
+        -- Nearly all Gradle projects have a multi-module structure with a
+        -- top-level root project, and subdirectories contain subprojects of
+        -- the top-level root project.
+        --
+        -- If Gradle exits non-zero when invoked in the root project, it will
+        -- almost certainly exit non-zero in subprojects, so there's no point
+        -- in looking for subprojects in this subtree.
+        Nothing -> pure ([], WalkSkipAll)
+        Just result -> do
           let subprojects = parseProjects result
 
           let project =
@@ -234,7 +226,7 @@ parseSubproject line =
 mkProject :: GradleProject -> DiscoveredProject GradleProject
 mkProject project =
   DiscoveredProject
-    { projectType = "gradle"
+    { projectType = GradleProjectType
     , projectBuildTargets = maybe ProjectWithoutTargets FoundTargets $ nonEmpty $ Set.map BuildTarget $ gradleProjects project
     , projectPath = gradleDir project
     , projectData = project
@@ -245,7 +237,8 @@ getDeps ::
   , Has Exec sig m
   , Has ReadFS sig m
   , Has Diagnostics sig m
-  , Has (Reader AnalyzeExperimentalPreferences) sig m
+  , Has Logger sig m
+  , Has (Reader ExperimentalAnalyzeConfig) sig m
   ) =>
   FoundTargets ->
   GradleProject ->
@@ -270,7 +263,8 @@ analyze ::
   , Has Exec sig m
   , Has ReadFS sig m
   , Has Diagnostics sig m
-  , Has (Reader AnalyzeExperimentalPreferences) sig m
+  , Has Logger sig m
+  , Has (Reader ExperimentalAnalyzeConfig) sig m
   ) =>
   FoundTargets ->
   Path Abs Dir ->
@@ -284,123 +278,17 @@ analyze foundTargets dir = withSystemTempDir "fossa-gradle" $ \tmpDir -> do
         FoundTargets targets -> gradleJsonDepsCmdTargets initScriptFilepath (toSet targets)
         ProjectWithoutTargets -> gradleJsonDepsCmd initScriptFilepath
 
-  stdout <- context "running gradle script" $ runGradle dir cmd
+  stdout <- context "running gradle script" $ errCtx FailedToRunGradleAnalysis $ runGradle dir cmd
 
   onlyConfigurations <- do
-    configs <- asks gradleOnlyConfigsAllowed
+    configs <- asks allowedGradleConfigs
     pure $ maybe Set.empty (Set.map ConfigName) configs
 
   let text = decodeUtf8 $ BL.toStrict stdout
+  let resolvedProjects = ResolutionApi.parseResolutionApiJsonDeps text
+  let graphFromResolutionApi = ResolutionApi.buildGraph resolvedProjects (onlyConfigurations)
 
-      textLines :: [Text]
-      textLines = Text.lines (Text.filter (/= '\r') text)
+  -- Log debug messages as seen in gradle script
+  sequence_ $ logDebug . pretty <$> (getDebugMessages text)
 
-      -- Output lines from the init script are of the format:
-      -- JSONDEPS_:project-path_{"configName":[{"type":"package", ...}, ...], ...}
-      --
-      -- See the init script's implementation for details.
-      jsonDepsLines :: [Text]
-      jsonDepsLines = mapMaybe (Text.stripPrefix "JSONDEPS_") textLines
-
-      packagePathsWithJson :: [(PackageName, Text)]
-      packagePathsWithJson = map (\line -> let (x, y) = Text.breakOn "_" line in (PackageName x, Text.drop 1 y {- drop the underscore; break doesn't remove it -})) jsonDepsLines
-
-      packagePathsWithDecoded :: [((PackageName, ConfigName), [JsonDep])]
-      packagePathsWithDecoded = do
-        (name, outJson) <- packagePathsWithJson
-        let configMap = fromMaybe mempty . decodeStrict $ encodeUtf8 outJson
-        (configName, deps) <- Map.toList configMap
-        pure ((name, ConfigName configName), deps)
-
-      packagesToOutput :: Map (PackageName, ConfigName) [JsonDep]
-      packagesToOutput = Map.fromList packagePathsWithDecoded
-
-  context "Building dependency graph" $ pure (buildGraph packagesToOutput onlyConfigurations)
-
--- TODO: use LabeledGraphing to add labels for environments
-buildGraph :: Map (PackageName, ConfigName) [JsonDep] -> Set ConfigName -> Graphing Dependency
-buildGraph projectsAndDeps onlyConfigs = run . withLabeling toDependency $ Map.traverseWithKey addProject filteredProjectAndDeps
-  where
-    filteredProjectAndDeps :: Map (PackageName, ConfigName) [JsonDep]
-    filteredProjectAndDeps = Map.filterWithKey (\(_, config) _ -> isConfigIncluded config) (projectsAndDeps)
-
-    isConfigExcluded :: ConfigName -> Bool
-    isConfigExcluded c = not (Set.null onlyConfigs) && Set.notMember c onlyConfigs
-
-    isConfigIncluded :: ConfigName -> Bool
-    isConfigIncluded = not . isConfigExcluded
-
-    -- add top-level projects from the output
-    addProject :: Has (LabeledGrapher JsonDep GradleLabel) sig m => (PackageName, ConfigName) -> [JsonDep] -> m ()
-    addProject (projName, configName) projDeps = do
-      let projAsDep = ProjectDep $ unPackageName projName
-          envLabel = configNameToLabel configName
-      direct projAsDep
-      label projAsDep envLabel
-      for_ projDeps $ \dep -> do
-        edge projAsDep dep
-        mkRecursiveEdges dep envLabel
-
-    -- Infers environment label based on the name of configuration.
-    -- Ref: https://docs.gradle.org/current/userguide/java_library_plugin.html#sec:java_library_configurations_graph
-    configNameToLabel :: ConfigName -> GradleLabel
-    configNameToLabel conf =
-      if (not . Set.null $ onlyConfigs)
-        then Env $ EnvOther (unConfigName conf) -- We only have specified configs, so we mark them all as Other
-        else case unConfigName conf of -- We have no specified configs, so we have to guess the correct Env.
-          "compileOnly" -> Env EnvDevelopment
-          x | x `elem` ["testImplementation", "testCompileOnly", "testRuntimeOnly", "testCompileClasspath", "testRuntimeClasspath"] -> Env EnvTesting
-          x | isDefaultAndroidDevConfig x -> Env EnvDevelopment
-          x | isDefaultAndroidTestConfig x -> Env EnvTesting
-          x -> Env $ EnvOther x
-
-    toDependency :: JsonDep -> Set GradleLabel -> Dependency
-    toDependency dep = foldr applyLabel $ jsonDepToDep dep
-
-    applyLabel :: GradleLabel -> Dependency -> Dependency
-    applyLabel lbl dep = case lbl of
-      Env env -> insertEnvironment env dep
-
-    -- build edges between deps, recursively
-    mkRecursiveEdges :: Has (LabeledGrapher JsonDep GradleLabel) sig m => JsonDep -> GradleLabel -> m ()
-    mkRecursiveEdges (ProjectDep x) envLabel = label (ProjectDep x) envLabel
-    mkRecursiveEdges jsondep@(PackageDep _ _ deps) envLabel = do
-      label jsondep envLabel
-      for_ deps $ \child -> do
-        edge jsondep child
-        mkRecursiveEdges child envLabel
-
-    jsonDepToDep :: JsonDep -> Dependency
-    jsonDepToDep (ProjectDep name) = projectToDep name
-    jsonDepToDep (PackageDep name version _) =
-      Dependency
-        { dependencyType = MavenType
-        , dependencyName = name
-        , dependencyVersion = Just (CEq version)
-        , dependencyLocations = []
-        , dependencyEnvironments = mempty
-        , dependencyTags = Map.empty
-        }
-
-    projectToDep name =
-      Dependency
-        { dependencyType = SubprojectType
-        , dependencyName = name
-        , dependencyVersion = Nothing
-        , dependencyLocations = []
-        , dependencyEnvironments = mempty
-        , dependencyTags = Map.empty
-        }
-
-data JsonDep
-  = ProjectDep Text -- name
-  | PackageDep Text Text [JsonDep] -- name version deps
-  deriving (Eq, Ord, Show)
-
-instance FromJSON JsonDep where
-  parseJSON = withObject "JsonDep" $ \obj -> do
-    ty <- obj .: "type" :: Parser Text
-    case ty of
-      "project" -> ProjectDep <$> obj .: "name"
-      "package" -> PackageDep <$> obj .: "name" <*> obj .: "version" <*> obj .: "dependencies"
-      _ -> unexpected (String ty)
+  context "Building dependency graph" $ pure graphFromResolutionApi

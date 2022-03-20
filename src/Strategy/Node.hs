@@ -4,26 +4,31 @@
 
 module Strategy.Node (
   discover,
+  pkgGraph,
+  NodeProject (..),
 ) where
 
 import Algebra.Graph.AdjacencyMap qualified as AM
 import Algebra.Graph.AdjacencyMap.Extra qualified as AME
 import App.Fossa.Analyze.Types (AnalyzeProject (analyzeProject))
+import App.Pathfinder.Types (LicenseAnalyzeProject, licenseAnalyzeProject)
 import Control.Effect.Diagnostics (
   Diagnostics,
   Has,
   context,
-  errorBoundary,
+  errCtx,
   fatalText,
   fromEither,
   fromEitherShow,
-  fromMaybeText,
-  renderFailureBundle,
+  fromMaybe,
+  recover,
+  warnOnErr,
  )
-import Control.Monad ((<=<))
+import Control.Monad (void, (<=<))
 import Data.Glob (Glob)
 import Data.Glob qualified as Glob
-import Data.Map (Map)
+import Data.List.Extra (singleton) -- singleton is in Data.List in base 4.16
+import Data.Map (Map, toList)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (catMaybes, mapMaybe)
 import Data.Set (Set)
@@ -33,6 +38,10 @@ import Data.Tagged (applyTag)
 import Data.Text (Text)
 import Data.Text qualified as Text
 import Data.Yaml.Aeson (ToJSON)
+import Diag.Common (
+  MissingDeepDeps (MissingDeepDeps),
+  MissingEdges (MissingEdges),
+ )
 import Discovery.Walk (
   WalkStep (WalkSkipSome),
   findFileNamed,
@@ -40,8 +49,6 @@ import Discovery.Walk (
  )
 import Effect.Logger (
   Logger,
-  logError,
-  logWarn,
  )
 import Effect.ReadFS (
   ReadFS,
@@ -50,7 +57,18 @@ import Effect.ReadFS (
   readContentsJson,
  )
 import GHC.Generics (Generic)
-import Path (Abs, Dir, File, Path, Rel, mkRelFile, parent, (</>))
+import Path (
+  Abs,
+  Dir,
+  File,
+  Path,
+  Rel,
+  mkRelFile,
+  parent,
+  toFilePath,
+  (</>),
+ )
+import Strategy.Node.Errors (CyclicPackageJson (CyclicPackageJson), MissingNodeLockFile (MissingNodeLockFile))
 import Strategy.Node.Npm.PackageLock qualified as PackageLock
 import Strategy.Node.PackageJson (
   Development,
@@ -59,6 +77,8 @@ import Strategy.Node.PackageJson (
   NodePackage (NodePackage),
   PackageJson (..),
   PkgJsonGraph (..),
+  PkgJsonLicense (LicenseObj, LicenseText),
+  PkgJsonLicenseObj (licenseUrl),
   PkgJsonWorkspaces (unWorkspaces),
   Production,
   pkgFileList,
@@ -69,8 +89,13 @@ import Strategy.Node.YarnV2.YarnLock qualified as V2
 import Types (
   DependencyResults (DependencyResults),
   DiscoveredProject (..),
+  DiscoveredProjectType (NpmProjectType, YarnProjectType),
   FoundTargets (ProjectWithoutTargets),
   GraphBreadth (Complete, Partial),
+  License (License),
+  LicenseResult (LicenseResult, licensesFound),
+  LicenseType (LicenseURL, UnknownType),
+  licenseFile,
  )
 
 skipJsFolders :: WalkStep
@@ -91,7 +116,8 @@ discover dir = context "NodeJS" $ do
       pure []
     else do
       globalGraph <- context "Building global workspace graph" $ pure $ buildManifestGraph manifestMap
-      graphs <- context "Splitting global graph into chunks" $ fromMaybeText "" $ splitGraph globalGraph
+      -- TODO: refactor splitGraph to report which cycle we hit, not just report some unknown cycle
+      graphs <- context "Splitting global graph into chunks" $ fromMaybe CyclicPackageJson $ splitGraph globalGraph
       context "Converting graphs to analysis targets" $ traverse (mkProject <=< identifyProjectType) graphs
 
 collectManifests :: (Has ReadFS sig m, Has Diagnostics sig m) => Path Abs Dir -> m [Manifest]
@@ -102,22 +128,15 @@ collectManifests = walk' $ \_ _ files ->
 
 mkProject ::
   ( Has Diagnostics sig m
-  , Has Logger sig m
   ) =>
   NodeProject ->
   m (DiscoveredProject NodeProject)
 mkProject project = do
   let (graph, typename) = case project of
-        Yarn _ g -> (g, "yarn")
-        NPMLock _ g -> (g, "npm")
-        NPM g -> (g, "npm")
-  result <- errorBoundary $ fromEitherShow $ findWorkspaceRootManifest graph
-  Manifest rootManifest <- case result of
-    Left bundle -> do
-      logError $ renderFailureBundle bundle
-      fatalText "aborting NodeJS project creation"
-    Right manifest -> do
-      pure manifest
+        Yarn _ g -> (g, YarnProjectType)
+        NPMLock _ g -> (g, NpmProjectType)
+        NPM g -> (g, NpmProjectType)
+  Manifest rootManifest <- fromEitherShow $ findWorkspaceRootManifest graph
   pure $
     DiscoveredProject
       { projectType = typename
@@ -134,7 +153,6 @@ instance AnalyzeProject NodeProject where
 getDeps ::
   ( Has ReadFS sig m
   , Has Diagnostics sig m
-  , Has Logger sig m
   ) =>
   NodeProject ->
   m DependencyResults
@@ -149,13 +167,19 @@ analyzeNpmLock (Manifest file) graph = do
 
 analyzeNpm :: (Has Diagnostics sig m) => PkgJsonGraph -> m DependencyResults
 analyzeNpm wsGraph = do
+  void
+    . recover
+    . warnOnErr MissingEdges
+    . warnOnErr MissingDeepDeps
+    . errCtx (MissingNodeLockFile)
+    $ fatalText "Lock files - yarn.lock or package-lock.json were not discovered."
+
   graph <- PackageJson.analyze $ Map.elems $ jsonLookup wsGraph
   pure $ DependencyResults graph Partial $ pkgFileList wsGraph
 
 analyzeYarn ::
   ( Has Diagnostics sig m
   , Has ReadFS sig m
-  , Has Logger sig m
   ) =>
   Manifest ->
   PkgJsonGraph ->
@@ -201,10 +225,10 @@ extractDepLists PkgJsonGraph{..} = foldMap extractSingle $ Map.elems jsonLookup
 
 loadPackage :: (Has Logger sig m, Has ReadFS sig m, Has Diagnostics sig m) => Manifest -> m (Maybe (Manifest, PackageJson))
 loadPackage (Manifest file) = do
-  result <- errorBoundary $ readContentsJson @PackageJson file
+  result <- recover $ readContentsJson @PackageJson file
   case result of
-    Left err -> logWarn (renderFailureBundle err) >> pure Nothing
-    Right contents -> pure $ Just (Manifest file, contents)
+    Nothing -> pure Nothing
+    Just contents -> pure $ Just (Manifest file, contents)
 
 buildManifestGraph :: Map Manifest PackageJson -> PkgJsonGraph
 buildManifestGraph manifestMap = PkgJsonGraph adjmap manifestMap
@@ -287,7 +311,35 @@ data NodeProject
   | NPM PkgJsonGraph
   deriving (Eq, Ord, Show, Generic)
 
+instance LicenseAnalyzeProject NodeProject where
+  licenseAnalyzeProject = pure . analyzeLicenses . pkgGraph
+
+analyzeLicenses :: PkgJsonGraph -> [LicenseResult]
+analyzeLicenses (PkgJsonGraph _ graph) = mapMaybe (uncurry mkLicenseResult) . toList $ graph
+
+mkLicenseResult :: Manifest -> PackageJson -> Maybe LicenseResult
+mkLicenseResult manifest PackageJson{..} = constrLicenseResult <$> allLicenses
+  where
+    manifestPath = toFilePath . unManifest $ manifest
+    allLicenses =
+      (singleton <$> packageLicense)
+        <> (map LicenseObj <$> packageLicenses)
+
+    mkLicense (LicenseText txt) = License UnknownType txt
+    mkLicense (LicenseObj pjlo) = License LicenseURL (licenseUrl pjlo)
+
+    constrLicenseResult licenses =
+      LicenseResult
+        { licenseFile = manifestPath
+        , licensesFound = map mkLicense licenses
+        }
+
 instance ToJSON NodeProject
+
+pkgGraph :: NodeProject -> PkgJsonGraph
+pkgGraph (Yarn _ pjg) = pjg
+pkgGraph (NPMLock _ pjg) = pjg
+pkgGraph (NPM pjg) = pjg
 
 findWorkspaceRootManifest :: PkgJsonGraph -> Either String Manifest
 findWorkspaceRootManifest PkgJsonGraph{jsonGraph} =

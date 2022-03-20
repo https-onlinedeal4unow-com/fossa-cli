@@ -1,4 +1,5 @@
 module Strategy.Rebar3 (
+  RebarProject (..),
   discover,
   findProjects,
   getDeps,
@@ -41,7 +42,7 @@ instance AnalyzeProject RebarProject where
 mkProject :: RebarProject -> DiscoveredProject RebarProject
 mkProject project =
   DiscoveredProject
-    { projectType = "rebar3"
+    { projectType = Rebar3ProjectType
     , projectBuildTargets = mempty
     , projectPath = rebarDir project
     , projectData = project

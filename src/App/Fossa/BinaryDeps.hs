@@ -1,26 +1,27 @@
-module App.Fossa.BinaryDeps (analyzeBinaryDeps) where
+module App.Fossa.BinaryDeps (
+  analyzeBinaryDeps,
+  analyzeSingleBinary,
+) where
 
 import App.Fossa.Analyze.Project (ProjectResult (..))
 import App.Fossa.BinaryDeps.Jar (resolveJar)
-import App.Fossa.VSI.IAT.Fingerprint (fingerprintRaw)
-import App.Fossa.VSI.IAT.Types (Fingerprint (..))
+import App.Fossa.VSI.Fingerprint (Fingerprint, fingerprintRaw)
 import Control.Algebra (Has)
-import Control.Carrier.Diagnostics (Diagnostics, fromEither)
+import Control.Effect.Diagnostics (Diagnostics)
 import Control.Effect.Lift (Lift)
 import Control.Monad (filterM)
-import Data.ByteString qualified as BS
 import Data.String.Conversion (toText)
 import Data.Text (Text)
 import Data.Text qualified as Text
-import Discovery.Filters (AllFilters (..), FilterCombination (combinedPaths))
+import Discovery.Filters (AllFilters (..), combinedPaths)
 import Discovery.Walk (WalkStep (WalkContinue), walk')
 import Effect.Logger (Logger)
-import Effect.ReadFS (ReadFS, readContentsBSLimit)
+import Effect.ReadFS (ReadFS, contentIsBinary)
 import Path (Abs, Dir, File, Path, isProperPrefixOf, (</>))
 import Path.Extra (tryMakeRelative)
 import Srclib.Converter qualified as Srclib
 import Srclib.Types (AdditionalDepData (..), SourceUnit (..), SourceUserDefDep (..))
-import Types (GraphBreadth (Complete))
+import Types (DiscoveredProjectType (BinaryDepsProjectType), GraphBreadth (Complete))
 
 -- | Binary detection is sufficiently different from other analysis types that it cannot be just another strategy.
 -- Instead, binary detection is run separately over the entire scan directory, outputting its own source unit.
@@ -32,14 +33,24 @@ analyzeBinaryDeps dir filters = do
   if null binaryPaths
     then pure Nothing
     else do
-      resolvedBinaries <- traverse (resolveBinary strategies dir) binaryPaths
+      resolvedBinaries <- traverse (analyzeSingleBinary dir) binaryPaths
       pure . Just $ toSourceUnit (toProject dir) resolvedBinaries
+
+-- | Equivalent to @analyzeBinaryDeps@, but analyzes a specific binary instead of discovering and analyzing all binaries in a directory.
+--
+-- This analysis uses strategies to attempt to extract some information from the binary, see the internal @strategies@ function for details.
+--
+-- The @Path Abs Dir@ provided is used to render the name of the resulting dependency:
+-- if we fallback to a plain "unknown binary" strategy its name is reported as the relative path between the provided @Path Abs Dir@ and the @Path Abs File@.
+-- If the path can't be made relative, the dependency name is the absolute path of the binary.
+analyzeSingleBinary :: (Has (Lift IO) sig m, Has Logger sig m, Has ReadFS sig m, Has Diagnostics sig m) => Path Abs Dir -> Path Abs File -> m SourceUserDefDep
+analyzeSingleBinary = resolveBinary strategies
 
 findBinaries :: (Has (Lift IO) sig m, Has Diagnostics sig m, Has ReadFS sig m) => PathFilters -> Path Abs Dir -> m [Path Abs File]
 findBinaries filters = walk' $ \dir _ files -> do
   if shouldFingerprintDir dir filters
     then do
-      binaries <- filterM fileIsBinary files
+      binaries <- filterM contentIsBinary files
       pure (binaries, WalkContinue)
     else pure ([], WalkContinue)
 
@@ -65,7 +76,7 @@ shouldFingerprintDir dir filters = (not shouldExclude) && shouldInclude
     isPrefixedOrEqual a b = a == b || isProperPrefixOf b a -- swap order of isProperPrefixOf comparison because we want to know if dir is prefixed by any filter
 
 toProject :: Path Abs Dir -> ProjectResult
-toProject dir = ProjectResult "binary-deps" dir mempty Complete []
+toProject dir = ProjectResult BinaryDepsProjectType dir mempty Complete []
 
 toSourceUnit :: ProjectResult -> [SourceUserDefDep] -> SourceUnit
 toSourceUnit project deps = do
@@ -75,16 +86,8 @@ toSourceUnit project deps = do
 -- | Just render the first few characters of the fingerprint.
 -- The goal is to provide a high confidence that future binaries with the same name won't collide,
 -- and we don't need all 256 bits for that.
-renderFingerprint :: Fingerprint -> Text
-renderFingerprint fingerprint = Text.take 12 $ unFingerprint fingerprint
-
--- | Determine if a file is binary using the same method as git:
--- "is there a zero byte in the first 8000 bytes of the file"
-fileIsBinary :: (Has ReadFS sig m, Has Diagnostics sig m) => Path Abs File -> m Bool
-fileIsBinary file = do
-  attemptedContent <- readContentsBSLimit file 8000
-  content <- fromEither attemptedContent
-  pure $ BS.elem 0 content
+renderFingerprint :: Fingerprint t -> Text
+renderFingerprint fingerprint = Text.take 12 $ toText fingerprint
 
 -- | Try the next strategy in the list. If successful, evaluate to its result; if not move down the list of strategies and try again.
 -- Eventually falls back to strategyRawFingerprint if no other strategy succeeds.
@@ -103,7 +106,7 @@ strategies =
 
 -- | Fallback strategy: resolve to a user defined dependency for the binary, where the name is the relative path and the version is the fingerprint.
 -- This strategy is used if no other strategy succeeds at resolving the binary.
-strategyRawFingerprint :: (Has (Lift IO) sig m, Has Diagnostics sig m) => Path Abs Dir -> Path Abs File -> m SourceUserDefDep
+strategyRawFingerprint :: (Has ReadFS sig m, Has (Lift IO) sig m, Has Diagnostics sig m) => Path Abs Dir -> Path Abs File -> m SourceUserDefDep
 strategyRawFingerprint root file = do
   fp <- fingerprintRaw file
   let rel = tryMakeRelative root file

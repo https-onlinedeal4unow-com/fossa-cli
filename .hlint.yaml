@@ -14,17 +14,25 @@
 
 # Styling Preferences
 - suggest: {lhs: "asum [x, y]", rhs: x <|> y}
-- suggest: {lhs: return x, rhs: pure x}
+- suggest: {lhs: return, rhs: pure}
 - suggest: {lhs: () <$ x, rhs: Control.Monad.void x}
 - suggest: {lhs: x <&> f, rhs: f <$> x}
-- suggest: {lhs: Data.Text.pack x, rhs: Data.String.Conversion.toText x}
-- suggest: {lhs: Data.Text.unpack x, rhs: Data.String.Conversion.toString x}
 
-# Forbidden items, only allowed in compile-time code, or test code.
+- suggest: {lhs: Data.Text.pack, rhs: Data.String.Conversion.toText}
+- ignore: {name: "Use toText", within: ["Data.String.Conversion"]}
+
+- suggest: {lhs: Data.Text.unpack, rhs: Data.String.Conversion.toString}
+- ignore: {name: "Use toString", within: ["Data.String.Conversion"]}
+
+- suggest: {lhs: Data.List.foldl, rhs: Data.List.foldl'}
+- suggest: {lhs: "(Data.Set.size x) == 0" , rhs: "Data.Set.null x"}
+- suggest: {lhs: "(Data.Set.size x) /= 0" , rhs: "not $ Data.Set.null x"}
+
+# Forbidden items, only allowed in compile-time code, or test code (however, it should be avoided in tests as much as possible).
 - functions:
   - {name: error, within: [Data.String.Conversion, Control.Effect.Replay]}
   - {name: undefined, within: []}
-  - {name: Prelude.head, within: [Control.Effect.Replay.TH, Control.Effect.Record.TH, Elixir.MixTreeSpec]}
+  - {name: Prelude.head, within: [Control.Effect.Replay.TH, Control.Effect.Record.TH], message: "Use Data.List.Extra.head' instead."}
   - {name: Prelude.tail, within: []}
   - {name: Prelude.init, within: []}
   - {name: Prelude.last, within: []}
@@ -36,6 +44,13 @@
   - {name: Data.Text.tail, within: []}
   - {name: Data.Text.init, within: []}
   - {name: Data.Text.last, within: []}
-  - {name: "Prelude.!!", within: [Elixir.MixTreeSpec]}
+  - {name: "Prelude.!!", within: []}
   - {name: "Data.Map.!", within: []}
+    # TODO: remove the need to special-case this test module.
   - {name: fromJust, within: [App.DocsSpec]}
+  - {name: Test.Hspec.fdescribe, within: [], message: "May prevent tests from running"}
+    # We define fit' in terms of fit,so this is necessary
+  - {name: Test.Hspec.fit, within: [Test.Effect], message: "May prevent tests from running"}
+  - {name: Test.Hspec.focus, within: [], message: "May prevent tests from running"}
+  - {name: Test.Hspec.fspecify, within: [], message: "May prevent tests from running"}
+  - {name: Test.Hspec.fcontext, within: [], message: "May prevent tests from running"}

@@ -64,6 +64,7 @@ is_supported_platform() {
   case "$platform" in
     windows/amd64) found=0 ;;
     darwin/amd64) found=0 ;;
+    darwin/arm64) found=0 ;;
     linux/amd64) found=0 ;;
   esac
   return $found
@@ -176,6 +177,7 @@ uname_arch() {
   arch=$(uname -m)
   case $arch in
     x86_64) arch="amd64" ;;
+    arm64) arch="arm64" ;;
     x86) arch="386" ;;
     i686) arch="386" ;;
     i386) arch="386" ;;
@@ -247,9 +249,9 @@ http_download_curl() {
   source_url=$2
   header=$3
   if [ -z "$header" ]; then
-    code=$(curl -w '%{http_code}' -sL -o "$local_file" "$source_url")
+    code=$(curl -w '%{http_code}' -sL -o "$local_file" "$source_url") || (log_debug "curl command failed." && return 1)
   else
-    code=$(curl -w '%{http_code}' -sL -H "$header" -o "$local_file" "$source_url")
+    code=$(curl -w '%{http_code}' -sL -H "$header" -o "$local_file" "$source_url") || (log_debug "curl command failed." && return 1)
   fi
   if [ "$code" != "200" ]; then
     log_debug "http_download_curl received HTTP status $code"
@@ -262,9 +264,9 @@ http_download_wget() {
   source_url=$2
   header=$3
   if [ -z "$header" ]; then
-    wget -q -O "$local_file" "$source_url"
+    wget -q -O "$local_file" "$source_url" || (log_debug "wget command failed." && return 1)
   else
-    wget -q --header "$header" -O "$local_file" "$source_url"
+    wget -q --header "$header" -O "$local_file" "$source_url" || (log_debug "wget command failed." && return 1)
   fi
 }
 http_download() {
@@ -281,6 +283,15 @@ http_download() {
 }
 http_copy() {
   tmp=$(mktemp)
+  if [ ! -w "$tmp" ];
+  then
+    log_crit "Generated tempory file ${tmp} is not writable!"
+  fi
+  if [ ! -r "$tmp" ];
+  then
+    log_crit "Generated tempory file ${tmp} is not readable!"
+  fi
+
   http_download "${tmp}" "$1" "$2" || return 1
   body=$(cat "$tmp")
   rm -f "${tmp}"
@@ -341,6 +352,29 @@ End of functions from https://github.com/client9/shlib
 ------------------------------------------------------------------------
 EOF
 
+###############################################
+# Gets the binary filename (without extentsion)
+# used in repo release.
+#
+# Globals:
+#   PROJECT_NAME
+#   VERSION
+#   OS
+#   ARCH
+# Arguments:
+#   None
+################################################
+get_binary_name() {
+  name=${PROJECT_NAME}_${VERSION}_${OS}_${ARCH}
+  case ${PLATFORM} in
+    darwin/arm64)
+      log_info "Platform ${PLATFORM} (m1 silicon) detected, using compatible darwin/amd64 binary instead."
+      name=${PROJECT_NAME}_${VERSION}_${OS}_amd64
+      ;;
+  esac
+  echo "$name"
+}
+
 PROJECT_NAME="fossa"
 OWNER=fossas
 REPO="fossa-cli"
@@ -372,11 +406,12 @@ adjust_os
 
 adjust_arch
 
-log_info "found version: ${VERSION} for ${TAG}/${OS}/${ARCH}"
 
-NAME=${PROJECT_NAME}_${VERSION}_${OS}_${ARCH}
+NAME=$(get_binary_name)
 TARBALL=${NAME}.${FORMAT}
 TARBALL_URL=${GITHUB_DOWNLOAD}/${TAG}/${TARBALL}
+log_info "found fossa-cli ${VERSION} binary for ${PLATFORM} at ${TARBALL_URL}"
+
 CHECKSUM=${PROJECT_NAME}_${VERSION}_checksums.txt
 CHECKSUM_URL=${GITHUB_DOWNLOAD}/${TAG}/${CHECKSUM}
 

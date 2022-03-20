@@ -1,7 +1,9 @@
 {-# LANGUAGE RecordWildCards #-}
 
 module App.Fossa.VSI.Types (
+  ScanID (..),
   Locator (..),
+  AnalysisStatus (..),
   LocatorParseError (..),
   SkipResolution (..),
   shouldSkipResolving,
@@ -11,10 +13,11 @@ module App.Fossa.VSI.Types (
   userDefinedFetcher,
   isTopLevelProject,
   toDependency,
+  parseAnalysisStatus,
 ) where
 
 import Control.Effect.Diagnostics (ToDiagnostic, renderDiagnostic)
-import Data.Aeson (FromJSON (parseJSON), withObject, (.:))
+import Data.Aeson (FromJSON (parseJSON), ToJSON, withObject, (.:))
 import Data.Set (Set)
 import Data.Set qualified as Set
 import Data.String.Conversion (ToText, toText)
@@ -23,6 +26,24 @@ import DepTypes (DepType (..), Dependency (..), VerConstraint (CEq))
 import Effect.Logger (Pretty (pretty), viaShow)
 import Srclib.Converter (depTypeToFetcher, fetcherToDepType)
 import Srclib.Types qualified as Srclib
+
+-- | The VSI backend returns a scan ID when a scan is created, which is then used to add files to the scan and get inferred OSS dependencies.
+newtype ScanID = ScanID {unScanID :: Text} deriving (ToJSON, FromJSON)
+
+-- | The VSI backend returns statuses for tracking which stage analysis is on.
+-- Programmatically we only care about some of these, the rest are informational and can be safely shown to a user to indicate activity.
+data AnalysisStatus
+  = AnalysisPending
+  | AnalysisFinished
+  | AnalysisFailed
+  | AnalysisInformational Text
+
+parseAnalysisStatus :: Text -> AnalysisStatus
+parseAnalysisStatus status = case status of
+  "NOT_STARTED" -> AnalysisPending
+  "DONE" -> AnalysisFinished
+  "FAILED" -> AnalysisFailed
+  other -> AnalysisInformational other
 
 -- | VSI supports a subset of possible Locators.
 -- Specifically, all VSI locators must have a valid revision.
@@ -40,8 +61,8 @@ instance FromJSON Locator where
       <*> obj .: "package"
       <*> obj .: "revision"
 
-parseLocator :: Text -> Either LocatorParseError Locator
-parseLocator = validateLocator . Srclib.parseLocator
+parseLocator :: (ToText a) => a -> Either LocatorParseError Locator
+parseLocator = validateLocator . Srclib.parseLocator . toText
 
 renderLocator :: Locator -> Text
 renderLocator Locator{..} = locatorFetcher <> "+" <> locatorProject <> "$" <> locatorRevision
@@ -63,6 +84,7 @@ instance ToDiagnostic LocatorParseError where
 -- To handle this case we provide users with an escape hatch, which is an argument allowing them to skip resolving some of their dependencies.
 -- This type canonicalizes that request.
 newtype SkipResolution = SkipResolution {unVSISkipResolution :: Set Locator}
+  deriving (Eq, Ord, Show)
 
 shouldSkipResolving :: SkipResolution -> Locator -> Bool
 shouldSkipResolving skip loc = loc `Set.member` (unVSISkipResolution skip)
